@@ -16,9 +16,14 @@ type creditEntry struct {
 
 type credits struct {
 	db *sqlx.DB
+	rl *rateLimiter
 }
 
 func (c *credits) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	if c.rl.Limit(res, req) {
+		return
+	}
+
 	var entries []creditEntry
 	err := c.db.Select(&entries, `select username, role, accountid from credits
 		order by case role
@@ -30,22 +35,14 @@ func (c *credits) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 
 	if err != nil {
 		log.Printf("error getting credits info: %v\n", err)
-		resp, _ := json.Marshal(struct {
-			Error string `json:"error"`
-		}{"Internal server error"})
-		res.WriteHeader(500)
-		res.Write(resp)
+		writeErr(res, "Internal server error", 500)
 		return
 	}
 
 	resp, err := json.Marshal(entries)
 	if err != nil {
 		log.Printf("error formatting credits info: %v\n", err)
-		resp, _ := json.Marshal(struct {
-			Error string `json:"error"`
-		}{"Internal server error"})
-		res.WriteHeader(500)
-		res.Write(resp)
+		writeErr(res, "Internal server error", 500)
 		return
 	}
 

@@ -4,42 +4,74 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/jmoiron/sqlx"
 )
 
-type tagEntry struct {
-	Username  string `db:"username" json:"username"`
-	Role      string `db:"role" json:"role"`
-	AccountID int    `db:"accountid" json:"accountid"`
+type levelEntry struct {
+	ID       int    `db:"id" json:"id"`
+	Tags     string `db:"tags" json:"tags"`
+	Name     string `db:"name" json:"name"`
+	Category string `db:"category" json:"category"`
 }
 
 type get struct {
 	db *sqlx.DB
+	rl *rateLimiter
 }
 
 func (c *get) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	var entries []tagEntry
-	err := c.db.Select(&entries, `SELECT id, tags FROM levels WHERE id = ANY($1)`)
+	if c.rl.Limit(res, req) {
+		return
+	}
+
+	id := req.URL.Query().Get("id")
+	if id == "" {
+		writeErr(res, "Missing IDs", 400)
+		return
+	}
+	idStrs := strings.Split(id, ",")
+	ids := make([]int, 0, len(idStrs))
+	for _, idStr := range idStrs {
+		parsed, err := strconv.Atoi(idStr)
+		if err != nil {
+			continue
+		}
+		ids = append(ids, parsed)
+	}
+
+	if len(ids) == 0 {
+		writeErr(res, "Invalid IDs", 400)
+		return
+	}
+
+	query, args, err := sqlx.In(`select id, tags from levels where id = any(?)`, ids)
+	if err != nil {
+		writeErr(res, "Internal server error", 500)
+		log.Printf("error constructing query for levels: %v", err)
+		return
+	}
+	query = c.db.Rebind(query)
+
+	var entries []levelEntry
+	err = c.db.Select(&entries, query, args...)
 
 	if err != nil {
-		log.Printf("error getting credits info: %v\n", err)
-		resp, _ := json.Marshal(struct {
-			Error string `json:"error"`
-		}{"Internal server error"})
-		res.WriteHeader(500)
-		res.Write(resp)
+		log.Printf("error getting level info: %v", err)
+		return
+	}
+
+	if len(entries) == 0 {
+		writeErr(res, "No levels found", 404)
 		return
 	}
 
 	resp, err := json.Marshal(entries)
 	if err != nil {
-		log.Printf("error formatting credits info: %v\n", err)
-		resp, _ := json.Marshal(struct {
-			Error string `json:"error"`
-		}{"Internal server error"})
-		res.WriteHeader(500)
-		res.Write(resp)
+		log.Printf("error formatting level info: %v\n", err)
+		writeErr(res, "Internal server error", 500)
 		return
 	}
 
