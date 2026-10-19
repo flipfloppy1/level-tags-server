@@ -3,18 +3,23 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"maps"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jmoiron/sqlx"
 )
 
+var pgMap = pgtype.NewMap()
+
 type levelEntry struct {
-	ID       int    `db:"id" json:"id"`
-	Tags     string `db:"tags" json:"tags"`
-	Name     string `db:"name" json:"name"`
-	Category string `db:"category" json:"category"`
+	ID       int      `db:"id" json:"id"`
+	Tags     []string `db:"tags" json:"tags"`
+	Name     string   `db:"name" json:"name"`
+	Category string   `db:"category" json:"category"`
 }
 
 type get struct {
@@ -55,22 +60,61 @@ func (c *get) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	}
 	query = c.db.Rebind(query)
 
-	var entries []levelEntry
-	err = c.db.Select(&entries, query, args...)
+	var levels []levelEntry
+	err = c.db.Select(&levels, query, args...)
 
 	if err != nil {
 		log.Printf("error getting level info: %v", err)
 		return
 	}
 
-	if len(entries) == 0 {
+	if len(levels) == 0 {
 		writeErr(res, "No levels found", 404)
 		return
 	}
 
-	resp, err := json.Marshal(entries)
+	tagNameSet := make(map[string]struct{})
+	for _, l := range levels {
+		for _, t := range l.Tags {
+			tagNameSet[t] = struct{}{}
+		}
+	}
+	tagNames := slices.Collect(maps.Keys(tagNameSet))
+
+	query, args, err = sqlx.In("select * from tags where name = any(?)", tagNames)
 	if err != nil {
-		log.Printf("error formatting level info: %v\n", err)
+		log.Printf("error constructing query for tags: %v\n", err)
+		writeErr(res, "Internal server error", 500)
+		return
+	}
+	query = c.db.Rebind(query)
+	var tags []tagEntry
+	err = c.db.Select(&tags, query, args...)
+	if err != nil {
+		log.Printf("error querying tags for levels: %v\n", err)
+		writeErr(res, "Internal server error", 500)
+		return
+	}
+
+	tagMap := make(map[string]tagEntry)
+	for _, t := range tags {
+		tagMap[t.Name] = t
+	}
+
+	returnTags := make(map[int]map[string][]string)
+
+	for _, l := range levels {
+		levelTags := make(map[string][]string)
+		for _, t := range l.Tags {
+			tag := tagMap[t]
+			levelTags[tag.Category] = append(levelTags[tag.Category], tag.Name)
+		}
+		returnTags[l.ID] = levelTags
+	}
+
+	resp, err := json.Marshal(returnTags)
+	if err != nil {
+		log.Printf("error formatting level tag info: %v\n", err)
 		writeErr(res, "Internal server error", 500)
 		return
 	}
